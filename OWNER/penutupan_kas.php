@@ -15,19 +15,65 @@ $error = '';
 // Fungsi untuk mendapatkan saldo akhir hari sebelumnya
 function getSaldoAkhirHariSebelumnya(mysqli $conn, string $tanggal): float {
 	$tglEsc = mysqli_real_escape_string($conn, $tanggal);
-	// Ambil saldo akhir dari cash_flow untuk hari sebelum tanggal yang dipilih
-	$q = mysqli_query($conn, "
+	
+	// Prioritas 1: Ambil dari shift terakhir yang ditutup
+	// Ambil shift terakhir yang sudah ditutup berdasarkan closed_at dan shift_id (yang paling baru)
+	$qShift = mysqli_query($conn, "
+		SELECT actual_closing_cash
+		FROM kas_shift
+		WHERE status = 'closed' AND actual_closing_cash IS NOT NULL AND actual_closing_cash > 0
+		ORDER BY closed_at DESC, shift_id DESC
+		LIMIT 1
+	");
+	if ($qShift && mysqli_num_rows($qShift) > 0) {
+		$rShift = mysqli_fetch_assoc($qShift);
+		$actualClosing = floatval($rShift['actual_closing_cash']);
+		if ($actualClosing > 0) {
+			return $actualClosing;
+		}
+	}
+	
+	// Prioritas 2: Ambil saldo akhir terakhir dari cash_flow (sama seperti di dashboard)
+	// Ini mengambil saldo akhir kumulatif terakhir, yang sudah termasuk semua transaksi yang sudah di-approve
+	$qFallback = mysqli_query($conn, "
 		SELECT saldo_akhir
 		FROM cash_flow
-		WHERE DATE(created_at) < '$tglEsc'
 		ORDER BY created_at DESC, kas_id DESC
 		LIMIT 1
 	");
-	if ($q && mysqli_num_rows($q) > 0) {
-		$r = mysqli_fetch_assoc($q);
-		return floatval($r['saldo_akhir']);
+	if ($qFallback && mysqli_num_rows($qFallback) > 0) {
+		$rFallback = mysqli_fetch_assoc($qFallback);
+		return floatval($rFallback['saldo_akhir']);
 	}
-	return 0.0;
+	
+	// Prioritas 3: Hitung saldo akhir secara manual jika belum ada data cash_flow
+	$hasStatus = mysqli_query($conn, "SHOW COLUMNS FROM transaksi_pemasukan LIKE 'status'");
+	$hasStatus = $hasStatus && mysqli_num_rows($hasStatus) > 0;
+	
+	$whereMasuk = "tanggal_masuk < '$tglEsc'";
+	if ($hasStatus) {
+		$whereMasuk .= " AND status='approved'";
+	}
+	$qMasuk = mysqli_query($conn, "
+		SELECT COALESCE(SUM(jumlah_pemasukan), 0) AS total
+		FROM transaksi_pemasukan
+		WHERE $whereMasuk
+	");
+	
+	$whereKeluar = "tanggal_keluar < '$tglEsc'";
+	if ($hasStatus) {
+		$whereKeluar .= " AND status='approved'";
+	}
+	$qKeluar = mysqli_query($conn, "
+		SELECT COALESCE(SUM(jumlah_pengeluaran), 0) AS total
+		FROM transaksi_pengeluaran
+		WHERE $whereKeluar
+	");
+	
+	$totalMasuk = $qMasuk ? floatval(mysqli_fetch_assoc($qMasuk)['total']) : 0.0;
+	$totalKeluar = $qKeluar ? floatval(mysqli_fetch_assoc($qKeluar)['total']) : 0.0;
+	
+	return $totalMasuk - $totalKeluar;
 }
 
 // Buka shift baru
